@@ -110,6 +110,19 @@ pub(crate) fn create_app() -> ArgMatches {
                 .help("The session's name. If not provided gets current session")
             )
         )
+        .subcommand(Command::new("split-window")
+            .alias("splitw")
+            .disable_help_flag(true)
+            .arg(
+                Arg::new("args")
+                    .required(false)
+                    .trailing_var_arg(true)
+                    .num_args(0..10)
+                    .allow_hyphen_values(true)
+                    .help("Anything that works with tmux split-window")
+            )
+            .about("Mimics the tmux split-window command, but sets the current worktree window as the default path.")
+        )
         .get_matches()
 }
 
@@ -417,6 +430,12 @@ pub(crate) fn handle_sub_commands(cli_args: ArgMatches) -> Result<SubCommandGive
             Ok(SubCommandGiven::Yes)
         }
         Some(("refresh", sub_cmd_matches)) => {
+            let session_path = String::from_utf8(
+                execute_tmux_command("tmux display-message -p '#{session_path}'").stdout,
+            )
+            .unwrap()
+            .trim()
+            .replace("'", "");
             let session_name = sub_cmd_matches
                 .get_one::<String>("name")
                 .unwrap_or(
@@ -426,12 +445,6 @@ pub(crate) fn handle_sub_commands(cli_args: ArgMatches) -> Result<SubCommandGive
                 .trim()
                 .replace("'", "");
             // For each window there should be the branch names
-            let session_path = String::from_utf8(
-                execute_tmux_command("tmux display-message -p '#{session_path}'").stdout,
-            )
-            .unwrap()
-            .trim()
-            .replace("'", "");
             let existing_window_names: Vec<_> = String::from_utf8(
                 execute_tmux_command(&format!(
                     "tmux list-windows -t {session_name} -F '#{{window_name}}'"
@@ -469,6 +482,57 @@ pub(crate) fn handle_sub_commands(cli_args: ArgMatches) -> Result<SubCommandGive
                     }
                 }
             }
+            Ok(SubCommandGiven::Yes)
+        }
+        Some(("split-window", args)) => {
+            let session_path = String::from_utf8(
+                execute_tmux_command("tmux display-message -p '#{session_path}'").stdout,
+            )
+            .unwrap()
+            .trim()
+            .replace("'", "");
+            let window_name = String::from_utf8(
+                execute_tmux_command("tmux display-message -p '#{window_name}'").stdout,
+            )
+            .unwrap()
+            .trim()
+            .replace("'", "");
+            let args: Vec<_> = args
+                .get_many::<String>("args")
+                .unwrap_or_default()
+                .collect();
+            let mut skip_value = false;
+            let mut filtered_args = vec![String::from("split-window")];
+            let mut starting_directory = None;
+            // remove -c arg to set a default value
+            // this can be everything from split-window command
+            for value in args {
+                if skip_value {
+                    skip_value = false;
+                    starting_directory = Some(value.to_string());
+                    continue;
+                }
+                if value.to_string() == String::from("-c") {
+                    skip_value = true;
+                    continue;
+                }
+                filtered_args.push(value.to_string())
+            }
+            if let None = starting_directory {
+                //set default value if in repository
+                if let Ok(repository) = Repository::open(session_path) {
+                    starting_directory = repository.path().to_string().ok();
+                    if let Ok(worktree) = repository.find_worktree(&window_name) {
+                        let path = worktree.path();
+                        starting_directory = path.to_string().ok();
+                    }
+                }
+            }
+            if let Some(value) = starting_directory {
+                filtered_args.push("-c".to_string());
+                filtered_args.push(value);
+            }
+            execute_command("tmux", filtered_args);
             Ok(SubCommandGiven::Yes)
         }
         _ => Ok(SubCommandGiven::No(config)),
