@@ -1,11 +1,12 @@
 use std::{collections::HashMap, fs::canonicalize};
 
 use crate::{
-    configs::Config, configs::SearchDirectory, execute_command, execute_tmux_command,
-    get_single_selection, TmsError,
+    configs::Config, configs::SearchDirectory, dirty_paths::DirtyUtf8Path, execute_command,
+    execute_tmux_command, get_single_selection, TmsError,
 };
 use clap::{Arg, ArgMatches, Command};
 use error_stack::{Result, ResultExt};
+use git2::Repository;
 
 pub(crate) fn create_app() -> ArgMatches {
     Command::new("tms")
@@ -100,6 +101,19 @@ pub(crate) fn create_app() -> ArgMatches {
                 .required(true)
                 .help("The new session's name")
             )
+        )
+        .subcommand(Command::new("split-window")
+            .alias("splitw")
+            .disable_help_flag(true)
+            .arg(
+                Arg::new("args")
+                    .required(false)
+                    .trailing_var_arg(true)
+                    .num_args(0..10)
+                    .allow_hyphen_values(true)
+                    .help("Anything that works with tmux split-window")
+            )
+            .about("Mimics the tmux split-window command, but sets the current worktree window as the default path.")
         )
         .get_matches()
 }
@@ -405,6 +419,57 @@ pub(crate) fn handle_sub_commands(cli_args: ArgMatches) -> Result<SubCommandGive
 
             execute_tmux_command(&format!("tmux rename-session {}", new_session_name));
             execute_tmux_command(&format!("tmux attach -c {}", new_session_path));
+            Ok(SubCommandGiven::Yes)
+        }
+        Some(("split-window", args)) => {
+            let session_path = String::from_utf8(
+                execute_tmux_command("tmux display-message -p '#{session_path}'").stdout,
+            )
+            .unwrap()
+            .trim()
+            .replace("'", "");
+            let window_name = String::from_utf8(
+                execute_tmux_command("tmux display-message -p '#{window_name}'").stdout,
+            )
+            .unwrap()
+            .trim()
+            .replace("'", "");
+            let args: Vec<_> = args
+                .get_many::<String>("args")
+                .unwrap_or_default()
+                .collect();
+            let mut skip_value = false;
+            let mut filtered_args = vec![String::from("split-window")];
+            let mut starting_directory = None;
+            // remove -c arg to set a default value
+            // this can be everything from split-window command
+            for value in args {
+                if skip_value {
+                    skip_value = false;
+                    starting_directory = Some(value.to_string());
+                    continue;
+                }
+                if value.to_string() == String::from("-c") {
+                    skip_value = true;
+                    continue;
+                }
+                filtered_args.push(value.to_string())
+            }
+            if let None = starting_directory {
+                //set default value if in repository
+                if let Ok(repository) = Repository::open(session_path) {
+                    starting_directory = repository.path().to_string().ok();
+                    if let Ok(worktree) = repository.find_worktree(&window_name) {
+                        let path = worktree.path();
+                        starting_directory = path.to_string().ok();
+                    }
+                }
+            }
+            if let Some(value) = starting_directory {
+                filtered_args.push("-c".to_string());
+                filtered_args.push(value);
+            }
+            execute_command("tmux", filtered_args);
             Ok(SubCommandGiven::Yes)
         }
         _ => Ok(SubCommandGiven::No(config)),
