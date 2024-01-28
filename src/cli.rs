@@ -6,7 +6,7 @@ use crate::{
 };
 use clap::{Arg, ArgMatches, Command};
 use error_stack::{Result, ResultExt};
-use git2::{Repository, WorktreePruneOptions};
+use git2::Repository;
 
 pub(crate) fn create_app() -> ArgMatches {
     Command::new("tms")
